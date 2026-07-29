@@ -1,7 +1,7 @@
 # Shrike Guard (Go)
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/shrike-security/shrike-guard-go.svg)](https://pkg.go.dev/github.com/shrike-security/shrike-guard-go)
-[![Go 1.24+](https://img.shields.io/badge/go-1.24+-00ADD8.svg)](https://go.dev/)
+[![Go 1.25+](https://img.shields.io/badge/go-1.25+-00ADD8.svg)](https://go.dev/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 **Shrike Guard** is the Go SDK for the [Shrike](https://shrikesecurity.com) platform — AI governance for every AI interaction. It wraps OpenAI, Anthropic (Claude), and Google Gemini clients to automatically evaluate every prompt against policy before it reaches the LLM. Whether you're governing a customer-facing chatbot, securing developer AI tools, or managing autonomous agent actions — the same 9-layer cognitive pipeline evaluates every interaction.
@@ -50,10 +50,10 @@ Detection depth depends on your tier. All tiers get the same SDK wrappers — ti
 ## Installation
 
 ```bash
-go get github.com/shrike-security/shrike-guard-go@v1.0.0
+go get github.com/shrike-security/shrike-guard-go@v1.0.1
 ```
 
-Requires Go 1.24+. Provider dependencies are pulled in only when you import the matching subpackage.
+Requires Go 1.25+. Provider dependencies are pulled in only when you import the matching subpackage.
 
 ## Quick Start
 
@@ -236,7 +236,7 @@ prompt := shrike.SystemPrompt() // shrike.SystemPromptVersion identifies the blo
 
 ## Compatibility
 
-- **Go**: 1.24+
+- **Go**: 1.25+
 - **Provider SDKs**:
   - OpenAI — `github.com/sashabaranov/go-openai`
   - Anthropic — `github.com/anthropics/anthropic-sdk-go` v1

@@ -1,5 +1,21 @@
 # Changelog
 
+## [v1.0.1] - 2026-07-29
+
+Security patch — bumps transitive dependencies to their fixed versions.
+
+### Security
+- Bump transitive dependencies to their fixed versions, clearing all `CRITICAL`/`HIGH` advisories flagged against v1.0.0 (all pulled in via the provider SDKs; the SDK itself does not use `ssh`/`grpc` directly):
+  - `golang.org/x/crypto` v0.40.0 → v0.52.0 (`ssh`)
+  - `golang.org/x/net` v0.41.0 → v0.55.0 (`net/html`)
+  - `golang.org/x/text` v0.27.0 → v0.39.0 (`norm` infinite loop)
+  - `google.golang.org/grpc` v1.66.2 → v1.82.1 (CVE-2026-33186)
+  - `google.golang.org/protobuf` v1.34.2 → v1.36.11 (+ `x/sync`/`x/sys`)
+- All versions match the Shrike backend, which already runs them.
+
+### Changed
+- **Minimum Go version is now 1.25** (required by the patched `x/crypto`), matching the Shrike backend toolchain.
+
 ## [v1.0.0] - 2026-07-29
 
 First public release of the Go SDK. It ships full feature parity with the Shrike
