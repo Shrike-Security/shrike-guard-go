@@ -62,6 +62,22 @@ func TestNewClient_RequiresAnthropicKey(t *testing.T) {
 	}
 }
 
+func TestNewClient_AcceptsBaseURL(t *testing.T) {
+	// A custom BaseURL (e.g. an Anthropic-compatible gateway) must be accepted
+	// and wired through option.WithBaseURL without error.
+	c, err := NewClient(ClientOptions{
+		AnthropicAPIKey: "sk-ant-test",
+		ShrikeAPIKey:    "shrike-test",
+		BaseURL:         "https://anthropic-gateway.internal/v1",
+	})
+	if err != nil {
+		t.Fatalf("NewClient with BaseURL: %v", err)
+	}
+	if c == nil {
+		t.Fatal("expected a non-nil client")
+	}
+}
+
 func TestExtractUserContent(t *testing.T) {
 	msgs := []anthropicsdk.MessageParam{
 		anthropicsdk.NewUserMessage(anthropicsdk.NewTextBlock("scan me")),

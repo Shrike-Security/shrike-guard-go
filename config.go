@@ -30,8 +30,11 @@ const (
 	// Override with WithEndpoint() for VPC deployments.
 	DefaultEndpoint = "https://api.shrikesecurity.com/agent"
 
-	// Note: All scanning is done via backend API (tier-based: community=L1-L4, pro=L1-L8)
-	// No local patterns needed - backend handles all detection logic
+	// Note: Scan depth is set by the backend from the license tier (community = L1-L5
+	// deterministic layers; Pro and above = full L1-L9 including LLM semantic, response
+	// intel and session correlation).
+	// Detection logic is backend-side. The one deliberate exception is PII redaction,
+	// which runs locally from a bundled pattern set so redaction survives a backend outage.
 
 	// SDKName identifies this SDK in API requests.
 	SDKName = "go"
@@ -41,7 +44,7 @@ const (
 )
 
 // Note: DefaultLocalPatterns removed - all scanning done via backend API
-// Backend has full regex patterns (~50+) and normalizers (L1-L4)
+// Backend has full regex patterns (~50+) and normalizers (L1-L5)
 
 // DefaultFailMode is the default fail mode. Set to FailModeClosed to match the
 // Shrike platform's Zero Trust contract: when the scanner cannot decide, the

@@ -33,6 +33,11 @@ type ClientOptions struct {
 
 	// ScanTimeout is the timeout for scan requests, in milliseconds.
 	ScanTimeout int
+
+	// BaseURL optionally overrides the Gemini API endpoint. Point this at a
+	// Gemini-compatible gateway or proxy to route model calls elsewhere.
+	// Applied via genai.HTTPOptions.BaseURL on the underlying client.
+	BaseURL string
 }
 
 // Client is a drop-in wrapper around the Gemini SDK with Shrike protection.
@@ -50,10 +55,14 @@ func NewClient(ctx context.Context, opts ClientOptions) (*Client, error) {
 		return nil, shrike.NewConfigError("Gemini API key is required")
 	}
 
-	gc, err := genai.NewClient(ctx, &genai.ClientConfig{
+	geminiCfg := &genai.ClientConfig{
 		APIKey:  opts.GeminiAPIKey,
 		Backend: genai.BackendGeminiAPI,
-	})
+	}
+	if opts.BaseURL != "" {
+		geminiCfg.HTTPOptions = genai.HTTPOptions{BaseURL: opts.BaseURL}
+	}
+	gc, err := genai.NewClient(ctx, geminiCfg)
 	if err != nil {
 		return nil, shrike.NewConfigError(fmt.Sprintf("failed to create Gemini client: %v", err))
 	}

@@ -1,5 +1,18 @@
 # Changelog
 
+## [v1.1.0] - 2026-08-31
+
+### Added
+- **Custom endpoint for the Anthropic and Gemini wrappers (`BaseURL`).** Both
+  `anthropic.ClientOptions` and `gemini.ClientOptions` now accept a `BaseURL`
+  that routes model calls to a compatible gateway or proxy — wired through
+  `option.WithBaseURL` and `genai.HTTPOptions.BaseURL` respectively. This brings
+  Anthropic and Gemini to parity with the OpenAI wrapper, which already accepted
+  a custom endpoint via `OpenAIConfig.BaseURL`.
+- **Documented local / self-hosted LLM governance.** New README section shows
+  governing an OpenAI-compatible local runtime (Ollama, vLLM, LM Studio) by
+  setting `OpenAIConfig.BaseURL`, plus the Anthropic and Gemini equivalents.
+
 ## [v1.0.1] - 2026-07-29
 
 Security patch — bumps transitive dependencies to their fixed versions.

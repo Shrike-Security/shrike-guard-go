@@ -59,6 +59,22 @@ func TestNewClient_RequiresGeminiKey(t *testing.T) {
 	}
 }
 
+func TestNewClient_AcceptsBaseURL(t *testing.T) {
+	// A custom BaseURL (e.g. a Gemini-compatible gateway) must be accepted and
+	// wired through genai.HTTPOptions.BaseURL without error.
+	c, err := NewClient(context.Background(), ClientOptions{
+		GeminiAPIKey: "test-key",
+		ShrikeAPIKey: "shrike-test",
+		BaseURL:      "https://gemini-gateway.internal",
+	})
+	if err != nil {
+		t.Fatalf("NewClient with BaseURL: %v", err)
+	}
+	if c == nil {
+		t.Fatal("expected a non-nil client")
+	}
+}
+
 func TestExtractUserContent(t *testing.T) {
 	contents := []*genai.Content{
 		{Role: "user", Parts: []*genai.Part{{Text: "scan me"}}},

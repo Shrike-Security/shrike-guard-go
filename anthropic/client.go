@@ -34,6 +34,11 @@ type ClientOptions struct {
 
 	// ScanTimeout is the timeout for scan requests, in milliseconds.
 	ScanTimeout int
+
+	// BaseURL optionally overrides the Anthropic API endpoint. Point this at an
+	// Anthropic-compatible gateway or proxy to route model calls elsewhere.
+	// Applied via option.WithBaseURL on the underlying Anthropic client.
+	BaseURL string
 }
 
 // Client is a drop-in wrapper around the Anthropic SDK with Shrike protection.
@@ -67,8 +72,13 @@ func NewClient(opts ClientOptions) (*Client, error) {
 		scannerOpts = append(scannerOpts, scanner.WithTimeout(shrike.DefaultScanTimeout))
 	}
 
+	anthropicOpts := []option.RequestOption{option.WithAPIKey(opts.AnthropicAPIKey)}
+	if opts.BaseURL != "" {
+		anthropicOpts = append(anthropicOpts, option.WithBaseURL(opts.BaseURL))
+	}
+
 	return &Client{
-		anthropic: anthropicsdk.NewClient(option.WithAPIKey(opts.AnthropicAPIKey)),
+		anthropic: anthropicsdk.NewClient(anthropicOpts...),
 		scanner:   scanner.NewClient(opts.ShrikeAPIKey, scannerOpts...),
 		failMode:  failMode,
 	}, nil

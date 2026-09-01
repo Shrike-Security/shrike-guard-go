@@ -50,7 +50,7 @@ Detection depth depends on your tier. All tiers get the same SDK wrappers — ti
 ## Installation
 
 ```bash
-go get github.com/shrike-security/shrike-guard-go@v1.0.1
+go get github.com/shrike-security/shrike-guard-go@latest
 ```
 
 Requires Go 1.25+. Provider dependencies are pulled in only when you import the matching subpackage.
@@ -144,6 +144,34 @@ shrikeopenai.ClientOptions{
 	ScanTimeout:    5000,                               // milliseconds (default 10000)
 }
 ```
+
+### Local and self-hosted LLMs
+
+Shrike governs the model you point it at — it does not have to be a hosted
+frontier API. Local runtimes like [Ollama](https://ollama.com),
+[vLLM](https://docs.vllm.ai), and LM Studio expose an OpenAI-compatible
+endpoint, so the OpenAI wrapper guards them via a custom `OpenAIConfig`:
+
+```go
+cfg := openai.DefaultConfig("ollama")        // local servers ignore the token
+cfg.BaseURL = "http://localhost:11434/v1"    // your local/self-hosted endpoint
+
+client, err := shrikeopenai.NewClient(shrikeopenai.ClientOptions{
+	OpenAIConfig: &cfg,
+	ShrikeAPIKey: "shrike-...",               // governance still runs server-side
+})
+```
+
+The Anthropic and Gemini wrappers take a `BaseURL` for compatible gateways
+(added in v1.1.0):
+
+```go
+shrikeanthropic.ClientOptions{AnthropicAPIKey: "…", ShrikeAPIKey: "shrike-...", BaseURL: "https://anthropic-gateway.example"}
+shrikegemini.ClientOptions{GeminiAPIKey: "…", ShrikeAPIKey: "shrike-...", BaseURL: "https://gemini-gateway.example"}
+```
+
+The prompt still leaves your process to reach the Shrike backend for scanning;
+the *model call* stays on your local/self-hosted endpoint.
 
 ### Fail Modes
 
