@@ -1,5 +1,96 @@
 # Changelog
 
+## [v1.2.0] - 2026-09-10
+
+### Added
+- **Act-plane scanning: every channel the backend scans is now reachable from
+  the SDK.** The backend has scanned eight specialized content types since the
+  act plane shipped; this SDK exposed four. `ScanCommand` — the highest-volume
+  surface, the one an agent hits before every shell-out — had no method at all,
+  so the only way to reach it was to hand-roll an HTTP call. New on `Client`:
+  - `ScanCommand(ctx, command, cwd)` — shell commands, screened before `exec`.
+    Commands are decomposed server-side, so SQL passed to `psql -c`, `mysql -e`
+    or a heredoc is scanned as SQL rather than as opaque shell text.
+  - `ScanWebSearch(ctx, query)` — search queries that acquire attack tooling,
+    credentials, or evasion tradecraft.
+  - `ScanRagContext(ctx, chunks, query)` — retrieved context, the standard
+    carrier for indirect prompt injection. Chunks are serialized as a JSON
+    array so the backend can split them apart again; joining them would lose
+    the boundary an injection usually sits on.
+  - `ScanMCPSchema(ctx, name, description, inputSchema)` — a single MCP tool
+    definition, for tool poisoning in a `tools/list` response. Its own endpoint
+    and detector, screened once at registration rather than per call.
+- **`ContentOrigin` on `ScanResult`.** Every verdict now says where the scanned
+  content came from: `human_prompt`, `agent_output`, `agent_action` or
+  `third_party`. This answers the question a verdict alone cannot — was that my
+  prompt, or the agent acting on its own — which decides who a refusal message
+  is addressed to. `AttributableToOperator(origin)` is the helper; it is true
+  only for `human_prompt`. Unknown content types resolve to `agent_action`,
+  never to `human_prompt`.
+- **Act-plane parity and wire-shape tests** (`scanner/actplane_test.go`). The
+  parity half iterates the canonical channel list and fails when a channel has
+  no method. The transport half asserts the endpoint, the `content_type`, the
+  optional arguments that must reach the payload, and that the scan auth header
+  is `Authorization`/`X-Shrike-API-Key` and never `X-API-Key`. Contract-symmetric
+  with the TypeScript and Python suites of the same name.
+
+- **Per-request session identity — `WithSession`, `WithAgentID` and
+  `ForSession`.** Session identity is the key the backend accumulates multi-turn
+  risk against, so it has to mean one unit of work: one agent run, one
+  conversation, one user's request. It defaults to a process-wide id, which
+  suits a CLI or a worker but not a server serving many end users, where every
+  user would share one risk score and one user's refusal would count against
+  the next user's action. `ForSession` returns a view sharing the parent's HTTP client,
+  circuit breaker and cache, so deriving one per request is cheap:
+
+  ```go
+  guard := scanner.NewClient(key)                        // once, at startup
+
+  func handle(w http.ResponseWriter, r *http.Request) {  // per request
+      scoped := guard.ForSession(sessionIDFor(r))
+      verdict, err := scoped.ScanCommand(r.Context(), cmd, "")
+  }
+  ```
+
+  Sharing the breaker is deliberate: breaker state is a property of the backend,
+  not of a session, and a per-request breaker would never accumulate enough
+  failures to open. The process-wide default is unchanged when nothing is
+  supplied, so single-agent callers keep multi-turn correlation; the SDK now
+  logs once when it is in force. Silence that with
+  `SHRIKE_SUPPRESS_SESSION_WARNING=1`.
+
+### Fixed
+- **`content_origin` was computed by the backend and dropped before the caller.**
+  `SanitizeScanResponse` is an allow-list, and the field was never added to
+  `preservedGovernanceFields` nor assigned, so it was serialized by the server
+  and stripped one layer before the application. Same defect as the one fixed
+  in the TypeScript and Python SDKs in 4.1.0.
+- **Session identity could not be configured.** Every scan in a process used one
+  generated session id, so a server scanning on behalf of more than one person
+  placed all of them in one session. See `WithSession` / `ForSession` above.
+
+### Changed
+- **Content-hash caching is now off by default.** Previously `NewClient`
+  enabled a 5-minute cache keyed on the content alone. Because the key carried
+  no session identity, a verdict shaped by one session's state could be served
+  to another session, or to the same session after its state had changed,
+  including an `allow` cached before a quarantine and served after it. A client
+  cannot see server-side session state, so it cannot safely cache a verdict
+  shaped by it, and the scan is an enforcement point rather than an advisory
+  check. Every scan now reaches the backend unless caching is requested.
+
+  Opt back in with `WithCache(ttl, maxSize)` where a stale allow is acceptable,
+  such as a single-tenant advisory check or a batch pass over static content.
+  `WithoutCache()` still works and is now only needed to undo an earlier
+  `WithCache` in the same option list. Note that a non-positive TTL or size
+  means "use the default", so `WithCache(0, 0)` enables a 5-minute cache rather
+  than disabling one.
+
+  **Upgrading:** callers who relied on the implicit cache will make more backend
+  calls. This is the intended direction; add `WithCache` explicitly if the
+  trade-off suits your deployment. The TypeScript and Python SDKs have no
+  equivalent cache, so this also restores parity across the three.
+
 ## [v1.1.0] - 2026-08-31
 
 ### Added

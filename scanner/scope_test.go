@@ -47,6 +47,59 @@ func TestDeclareScope(t *testing.T) {
 	}
 }
 
+// TestDeclareScope_RefreshBodyInherits pins the refresh contract: a call with
+// only AgentID + MaxDurationSeconds sends exactly those two keys, so the
+// backend inherits every other bound from the scope on file. Sending an
+// empty allowed_tools here would read as "no tools" (narrowing) and a missing
+// max_actions used to read as a cleared budget (widening), so the body must
+// carry neither.
+func TestDeclareScope_RefreshBodyInherits(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&payload)
+		if len(payload) != 2 || payload["agent_id"] != "agent_1" || payload["max_duration_seconds"] != float64(7200) {
+			t.Errorf("refresh body must be {agent_id, max_duration_seconds} only, got %v", payload)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"scope_id":        "scope_123",
+			"agent_id":        "agent_1",
+			"renewable_until": "2026-09-06T12:00:00Z",
+			"ceiling_reached": false,
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", WithEndpoint(server.URL))
+	res, err := client.DeclareScope(context.Background(), DeclareScopeOptions{AgentID: "agent_1", MaxDurationSeconds: 7200})
+	if err != nil {
+		t.Fatalf("DeclareScope refresh: %v", err)
+	}
+	if res.RenewableUntil != "2026-09-06T12:00:00Z" || res.CeilingReached {
+		t.Errorf("renewal fields not decoded: %+v", res)
+	}
+}
+
+// TestDeclareScope_RenewableSecondsForwarded: a first declaration may set the
+// renewal window.
+func TestDeclareScope_RenewableSecondsForwarded(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&payload)
+		if payload["renewable_seconds"] != float64(86400) {
+			t.Errorf("renewable_seconds not forwarded: %v", payload)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"scope_id": "scope_123"})
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", WithEndpoint(server.URL))
+	if _, err := client.DeclareScope(context.Background(), DeclareScopeOptions{
+		AgentID: "agent_1", AllowedTools: []string{"command"}, MaxDurationSeconds: 7200, RenewableSeconds: 86400,
+	}); err != nil {
+		t.Fatalf("DeclareScope: %v", err)
+	}
+}
+
 func TestDeclareScope_Error(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)

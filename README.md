@@ -180,6 +180,67 @@ Choose how the SDK behaves when the scan itself fails (timeout, network error, b
 - **`shrike.FailModeClosed`** (default) — block the request and return a `*shrike.ScanError`. Best for production security workloads: if the Shrike backend is down, traffic does not flow through unguarded.
 - **`shrike.FailModeOpen`** — allow the request to proceed. Best for non-production experiments or internal tools where availability must outrank enforcement. Trades the guard's enforcement promise for uptime.
 
+### Sessions: one per unit of work, not one per process
+
+Shrike correlates risk across a session. After a refusal, later actions in the
+same session are held until the session recovers. That is the multi-turn
+defence, and it means the session id has to mean one unit of work: one agent
+run, one conversation, one user's request.
+
+By default the SDK scans under one id for the whole process. That suits a CLI,
+a worker, or a single agent. It does not suit a server that scans on behalf of
+many end users, because every user then shares one risk score, and one user's
+refusal counts against the next user's action.
+
+Build one client at startup and derive a per-request view from it. The view
+shares the HTTP client, circuit breaker and cache, so it costs nothing to make
+one per request:
+
+```go
+guard := scanner.NewClient(key)                        // once, at startup
+
+func handle(w http.ResponseWriter, r *http.Request) {  // per request
+    scoped := guard.ForSession(sessionIDFor(r))
+    verdict, err := scoped.ScanCommand(r.Context(), cmd, "")
+    if err != nil || verdict.RefuseTier != "allow" {
+        ...
+    }
+}
+```
+
+Or pin the identity at construction when one client serves one unit of work:
+
+```go
+client := scanner.NewClient(key, scanner.WithSession("job-42"), scanner.WithAgentID("ingest"))
+```
+
+`WithAgentID` is separate on purpose: it names *which agent* a scope is
+enforced against and who an incident is attributed to. Set it when one process
+drives several distinct agents.
+
+The SDK logs once per process when it is scanning under the shared default.
+Set `SHRIKE_SUPPRESS_SESSION_WARNING=1` to silence it once you have decided
+the default is what you want.
+
+### The content cache and sessions
+
+Content-hash caching is off by default, so every scan reaches the backend and
+no verdict is reused. That is the right default for an enforcement point: a
+cache key built from content alone carries no session identity, so a cached
+verdict can outlive the session state that produced it, and an `allow` stored
+before a quarantine would be served after it.
+
+Opt in where a stale allow is acceptable, such as a single-tenant advisory
+check or a batch pass over static content:
+
+```go
+guard := scanner.NewClient(key, scanner.WithCache(5*time.Minute, 1000))
+```
+
+A non-positive TTL or size means "use the default", so `WithCache(0, 0)`
+enables a 5-minute cache rather than disabling one. `WithoutCache()` remains
+available to undo a `WithCache` passed earlier in the same option list.
+
 ## SQL and File Scanning
 
 Each provider wrapper also exposes standalone scanning:
@@ -252,7 +313,85 @@ if scanner.IsBlocked(res) {
 }
 ```
 
-`scanner.IsBlocked` is the single proceed-vs-refuse decision helper: it honors the server `action` (`allow`/`warn` proceed, `block`/`require_approval` refuse) and fails closed on unknown verdicts. The scanner also provides `DeclareScope`, `ScanA2AMessage`, and `ScanAgentCard` for agent-to-agent governance.
+`scanner.IsBlocked` is the single proceed-vs-refuse decision helper: it honors the server `action` (`allow`/`warn` proceed, `block`/`require_approval` refuse) and fails closed on unknown verdicts.
+
+## Scanning agent actions (shell commands, SQL, web search, RAG, MCP tools)
+
+Scanning the prompt protects the model. It does not protect the shell. An agent
+that was never told anything malicious can still be talked into running
+`curl … | sh` by a poisoned README, and the prompt scan has no view of that.
+
+`scanner.Client` exposes a method per action channel. Call the one that matches
+what the agent is about to do, before it does it:
+
+| Channel | Method | Screens for |
+|---|---|---|
+| Shell command | `ScanCommand(ctx, cmd, cwd)` | destructive commands, data exfiltration, credential dumps, embedded SQL injection |
+| SQL query | `ScanSQL(ctx, query, db, allowDestructive)` | SQL injection, unauthorized destructive statements |
+| File path | `ScanFile(ctx, path, "")` | path traversal, writes outside the working tree |
+| File content | `ScanFile(ctx, path, content)` | secrets, credentials, PII before they land on disk |
+| Web search | `ScanWebSearch(ctx, query)` | searches that acquire attack tooling, credentials, or evasion tradecraft |
+| RAG context | `ScanRagContext(ctx, chunks, query)` | indirect prompt injection in retrieved documents |
+| Agent message | `ScanA2AMessage(ctx, msg, opts)` | instructions smuggled between agents |
+| Agent card | `ScanAgentCard(ctx, card, verifySig)` | capability misrepresentation in A2A discovery |
+| MCP tool schema | `ScanMCPSchema(ctx, name, desc, schema)` | tool poisoning in `tools/list` responses |
+
+```go
+client := scanner.NewClient(os.Getenv("SHRIKE_API_KEY"))
+
+// Before shelling out
+res, err := client.ScanCommand(ctx, `psql -c "SELECT * FROM users"`, "/srv/app")
+if err != nil {
+	log.Fatal(err) // fail closed
+}
+if scanner.IsBlocked(res) {
+	return fmt.Errorf("refused: %s", res.Reason)
+}
+
+// Before searching the web
+res, _ = client.ScanWebSearch(ctx, "sql injection prevention owasp")
+
+// Screen an MCP tool before registering it — tool poisoning needs no execution
+res, _ = client.ScanMCPSchema(ctx, tool.Name, tool.Description, tool.InputSchema)
+```
+
+A shell command is not one thing. `ScanCommand` sends it to a backend that
+decomposes it, so SQL passed to `psql -c`, `mysql -e`, or a heredoc is scanned
+as SQL rather than as an opaque string of shell text.
+
+`DeclareScope` binds an agent to a declared operating scope, after which every
+scan for that `agent_id` is enforced against it server-side.
+
+### Who is answerable: `ContentOrigin`
+
+Every verdict carries `ContentOrigin`, which says where the scanned content came
+from. It answers the question a verdict alone cannot: *was that my prompt, or
+the agent acting on its own?*
+
+| Value | Meaning |
+|---|---|
+| `human_prompt` | the operator typed it |
+| `agent_output` | the model generated it |
+| `agent_action` | the agent is about to do it (every act-plane channel) |
+| `third_party` | it arrived from outside: a tool result, a retrieved document, a peer agent |
+
+```go
+res, _ := client.ScanRagContext(ctx, chunks, userQuery)
+
+if scanner.IsBlocked(res) {
+	if scanner.AttributableToOperator(res.ContentOrigin) {
+		showUser("Your request was blocked: " + res.Reason)
+	} else {
+		// The agent poisoned its own context. Telling the user "your request
+		// was blocked" would be both wrong and unhelpful.
+		log.Printf("agent-side refusal: %s", res.Reason)
+	}
+}
+```
+
+Unknown content types resolve to `agent_action`, never to `human_prompt`:
+attributing an unattributable action to the operator is the one error that is
+never safe to make by default.
 
 ## System Prompt
 

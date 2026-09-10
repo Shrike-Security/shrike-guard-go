@@ -210,8 +210,21 @@ var preservedGovernanceFields = []string{
 	"recovery",
 	"session_state",
 	"content_type",
+	"content_origin",
 	"approval_info",
 	"client_session_rotation",
+}
+
+// AttributableToOperator reports whether the operator is answerable for the
+// scanned content — i.e. a person typed it. Everything else was produced by
+// the agent or arrived from outside, and a refusal on it is not something the
+// operator did.
+//
+// Use it to decide who a refusal message is addressed to: telling a user
+// "your request was blocked" when the agent poisoned its own context is both
+// wrong and unhelpful.
+func AttributableToOperator(origin string) bool {
+	return origin == "human_prompt"
 }
 
 // NormalizeThreatType normalizes an internal threat-type string to the standard
@@ -303,6 +316,7 @@ func SanitizeScanResponse(raw map[string]interface{}) *ScanResult {
 	result.Recovery = getMap(raw, "recovery")
 	result.SessionState = getMap(raw, "session_state")
 	result.ContentType = getString(raw, "content_type")
+	result.ContentOrigin = getString(raw, "content_origin")
 	result.ApprovalInfo = getMap(raw, "approval_info")
 	if v, ok := raw["client_session_rotation"]; ok && v != nil {
 		result.ClientSessionRotation = v

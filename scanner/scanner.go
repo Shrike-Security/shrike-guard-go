@@ -8,8 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -50,8 +53,33 @@ type ScanResult struct {
 	SessionState map[string]interface{} `json:"session_state,omitempty"`
 	// ContentType is the specialized scan input type, e.g. "sql"/"file_path".
 	ContentType string `json:"content_type,omitempty"`
+	// ContentOrigin says where the scanned content came from — who is
+	// answerable for it:
+	//
+	//   human_prompt   the operator typed it
+	//   agent_output   the model generated it
+	//   agent_action   the agent is about to do it (every act-plane surface)
+	//   third_party    it arrived from outside: a tool result, a retrieved
+	//                  document, a peer agent
+	//
+	// This answers the question a verdict alone cannot: was that my prompt, or
+	// the agent acting on its own? Use it to decide who a refusal message is
+	// addressed to. Unknown content types resolve to agent_action, never to
+	// human_prompt — attributing an unattributable action to the operator is
+	// the one error that is never safe to make.
+	ContentOrigin string `json:"content_origin,omitempty"`
 	// ApprovalInfo is present on require_approval verdicts.
 	ApprovalInfo map[string]interface{} `json:"approval_info,omitempty"`
+	// HeldByScope is true when the agent's declared scope held this action
+	// (expired, tool outside the scope, or action ceiling reached). The hold
+	// never skips the content scan: a content block wins and stands as the
+	// verdict; otherwise the verdict is require_approval and ContentVerdict
+	// carries what the content scan said.
+	HeldByScope bool `json:"held_by_scope,omitempty"`
+	// ContentVerdict is the content scan's own answer on a held action:
+	// safe, refuse_tier, threat_type, severity. Present only when
+	// HeldByScope is true and the content was not blocked.
+	ContentVerdict map[string]interface{} `json:"content_verdict,omitempty"`
 	// ClientSessionRotation carries client-side session rotation guidance.
 	ClientSessionRotation interface{} `json:"client_session_rotation,omitempty"`
 	// Degraded is true for a fail-open verdict returned without a completed
@@ -68,13 +96,63 @@ var (
 	processAgentID   = uuid.New().String()
 )
 
+var processSessionWarnOnce sync.Once
+
+// warnOnceAboutTheProcessSession logs, once per process, that scans are using
+// the process-wide session id.
+//
+// The process-wide default suits a CLI, a worker or a single agent, and gives
+// those callers multi-turn correlation without configuration.
+//
+// It does not suit a server handling many end users: session identity is the
+// key the backend accumulates risk against, so every user sharing one id shares
+// one risk score, and one user's refusal counts against the next user's action.
+// The SDK cannot tell the two deployments apart, so the default is kept and
+// stated once. Pass WithSession, or derive a per-request client with
+// ForSession, and the message is not emitted.
+//
+// Silence it with SHRIKE_SUPPRESS_SESSION_WARNING=1.
+func warnOnceAboutTheProcessSession() {
+	processSessionWarnOnce.Do(func() {
+		if os.Getenv("SHRIKE_SUPPRESS_SESSION_WARNING") != "" {
+			return
+		}
+		log.Printf("[shrike-guard] Using the process-wide session id. This suits a single " +
+			"agent; a server handling many end users should use scanner.WithSession(id) " +
+			"or client.ForSession(<per-request id>) so each user has its own session. " +
+			"Set SHRIKE_SUPPRESS_SESSION_WARNING=1 to silence this message.")
+	})
+}
+
 // sessionContext builds the context object sent with every scan (session_id,
 // agent_id, source_application) merged with any per-call extras (e.g. database
 // name for SQL scans).
-func sessionContext(extra map[string]interface{}) map[string]interface{} {
+//
+// Method on Client rather than a package function: the identity belongs to the
+// client, so a per-request client carries a per-request session.
+func (c *Client) sessionContext(extra map[string]interface{}) map[string]interface{} {
+	sessionID := c.sessionID
+	if sessionID == "" {
+		warnOnceAboutTheProcessSession()
+		sessionID = processSessionID
+	}
+
+	// Client option, then SHRIKE_AGENT_ID, then the generated process id. The
+	// env override is the shared contract across the three SDKs
+	// (canonical-request-shapes.json, agent_id_env_override). Read at call
+	// time rather than at init so a value set after import takes effect, and
+	// so the contract can be tested in-process.
+	agentID := c.agentID
+	if agentID == "" {
+		agentID = os.Getenv("SHRIKE_AGENT_ID")
+	}
+	if agentID == "" {
+		agentID = processAgentID
+	}
+
 	ctx := map[string]interface{}{
-		"session_id":         processSessionID,
-		"agent_id":           processAgentID,
+		"session_id":         sessionID,
+		"agent_id":           agentID,
 		"source_application": "shrike-guard-go",
 	}
 	for k, v := range extra {
@@ -113,10 +191,66 @@ type Client struct {
 	cb         *shrike.CircuitBreaker
 	retryCfg   shrike.RetryConfig
 	cache      *shrike.ContentCache
+	// sessionID and agentID override the process-wide identity. Empty means
+	// "use the process default" — see sessionContext.
+	sessionID string
+	agentID   string
 }
 
 // Option is a function that configures a Client.
 type Option func(*Client)
+
+// WithSession sets the session this client scans under.
+//
+// Session identity is the key the backend accumulates multi-turn risk against,
+// so it should mean one unit of work: one agent run, one conversation, one
+// user's request. The default is a process-wide id, which suits a CLI or a
+// worker but not a server serving many end users, where each user needs its
+// own session.
+//
+// For the per-request case prefer ForSession, which reuses the parent's
+// connection pool and circuit breaker.
+func WithSession(sessionID string) Option {
+	return func(c *Client) {
+		c.sessionID = sessionID
+	}
+}
+
+// WithAgentID sets the agent this client scans as.
+//
+// Defaults to the process-wide id (SHRIKE_AGENT_ID when set). Set it when one
+// process drives several distinct agents, so scope enforcement and agent
+// attribution land on the right one.
+func WithAgentID(agentID string) Option {
+	return func(c *Client) {
+		c.agentID = agentID
+	}
+}
+
+// ForSession returns a view of this client that scans under sessionID.
+//
+// The returned client SHARES this one's HTTP client, circuit breaker and
+// cache, so calling it per request is cheap — that is the point. Build one
+// Client at startup and derive a per-request view from it:
+//
+//	guard := scanner.NewClient(key)              // once, at startup
+//
+//	func handle(w http.ResponseWriter, r *http.Request) {   // per request
+//	    scoped := guard.ForSession(sessionIDFor(r))
+//	    verdict, err := scoped.ScanCommand(r.Context(), cmd, "")
+//	}
+//
+// Without this, every end user shares one session id and therefore one risk
+// score, and one user's refusal counts against the next user's action.
+//
+// Sharing the circuit breaker is deliberate: breaker state is a property of the
+// backend, not of a session, and a per-request breaker would never accumulate
+// enough failures to open.
+func (c *Client) ForSession(sessionID string) *Client {
+	view := *c
+	view.sessionID = sessionID
+	return &view
+}
 
 // WithEndpoint sets a custom endpoint URL.
 func WithEndpoint(endpoint string) Option {
@@ -164,9 +298,29 @@ func WithRetry(cfg shrike.RetryConfig) Option {
 }
 
 // WithCache enables content-hash caching with the given TTL and max size.
+//
+// The cache is OFF unless you call this. It is keyed on the CONTENT ALONE, so
+// a verdict shaped by one session's state can be replayed to another session,
+// or to the same session after its state has changed, including an allow
+// cached before a quarantine and served after it. Enable it only where a stale
+// allow is acceptable: a single-tenant advisory check, or a batch pass over
+// static content. Leave it off wherever the scan is an enforcement gate.
+//
+// Note that a non-positive ttl or maxSize means "use the default", so
+// WithCache(0, 0) enables a 5-minute cache rather than disabling one.
 func WithCache(ttl time.Duration, maxSize int) Option {
 	return func(c *Client) {
 		c.cache = shrike.NewContentCache(ttl, maxSize)
+	}
+}
+
+// WithoutCache turns the client's content cache off.
+//
+// This is the default as of v1.2.0, so the option is only needed to undo a
+// WithCache passed earlier in the same option list.
+func WithoutCache() Option {
+	return func(c *Client) {
+		c.cache = nil
 	}
 }
 
@@ -177,8 +331,11 @@ func WithCache(ttl time.Duration, maxSize int) Option {
 // By default the client includes:
 //   - Circuit breaker (5 failures → open, 30s timeout, 2 successes to close)
 //   - Retry with exponential backoff (3 attempts, 200ms initial, 2x multiplier)
-//   - Content-hash cache (5 min TTL, 1000 entries)
 //   - Fail-closed mode (block requests when scan fails)
+//
+// Content-hash caching is OFF by default, because a cached verdict is keyed on
+// content alone and can outlive the session state that shaped it. Opt in with
+// WithCache when a stale allow is acceptable.
 func NewClient(apiKey string, opts ...Option) *Client {
 	retryCfg := shrike.DefaultRetryConfig()
 	retryCfg.IsRetryable = func(err error) bool {
@@ -201,7 +358,6 @@ func NewClient(apiKey string, opts ...Option) *Client {
 		failMode:   shrike.DefaultFailMode,
 		cb:         shrike.NewCircuitBreaker(shrike.DefaultCircuitBreakerConfig()),
 		retryCfg:   retryCfg,
-		cache:      shrike.NewContentCache(shrike.DefaultCacheTTL, shrike.DefaultCacheMaxSize),
 	}
 
 	for _, opt := range opts {
@@ -221,13 +377,20 @@ func (c *Client) CircuitBreakerStats() shrike.CircuitBreakerStats {
 	return c.cb.Stats()
 }
 
-// CacheStats returns content cache statistics.
+// CacheStats returns content cache statistics. Zero value when the cache is
+// off (see WithoutCache).
 func (c *Client) CacheStats() shrike.CacheStats {
+	if c.cache == nil {
+		return shrike.CacheStats{}
+	}
 	return c.cache.Stats()
 }
 
-// ClearCache clears the content cache.
+// ClearCache clears the content cache. No-op when the cache is off.
 func (c *Client) ClearCache() {
+	if c.cache == nil {
+		return
+	}
 	c.cache.Clear()
 }
 
@@ -280,16 +443,18 @@ func (c *Client) remoteScan(ctx context.Context, prompt, contextStr string) (*Sc
 
 	// Check content-hash cache
 	cacheKey := shrike.HashContent(prompt + contextStr)
-	if cached, ok := c.cache.Get(cacheKey); ok {
-		if result, ok := cached.(*ScanResult); ok {
-			return result, nil
+	if c.cache != nil {
+		if cached, ok := c.cache.Get(cacheKey); ok {
+			if result, ok := cached.(*ScanResult); ok {
+				return result, nil
+			}
 		}
 	}
 
 	payload := map[string]interface{}{
 		"prompt":    prompt,
 		"scan_type": "full",
-		"context":   sessionContext(nil),
+		"context":   c.sessionContext(nil),
 	}
 	if contextStr != "" {
 		payload["conversation_history"] = contextStr
@@ -343,7 +508,7 @@ func (c *Client) remoteScan(ctx context.Context, prompt, contextStr string) (*Sc
 	}
 
 	// Cache the result
-	if result != nil {
+	if result != nil && c.cache != nil {
 		c.cache.Set(cacheKey, result)
 	}
 
@@ -391,7 +556,7 @@ func (c *Client) ScanSQL(ctx context.Context, query, database string, allowDestr
 	payload := map[string]interface{}{
 		"content":      query,
 		"content_type": "sql",
-		"context":      sessionContext(toolCtx),
+		"context":      c.sessionContext(toolCtx),
 	}
 	return c.doSpecializedScan(ctx, payload, "sql:"+query)
 }
@@ -415,7 +580,7 @@ func (c *Client) ScanFile(ctx context.Context, path, content string) (*ScanResul
 	payload := map[string]interface{}{
 		"content":      path,
 		"content_type": contentType,
-		"context":      sessionContext(toolCtx),
+		"context":      c.sessionContext(toolCtx),
 	}
 	return c.doSpecializedScan(ctx, payload, contentType+":"+path)
 }
@@ -425,9 +590,11 @@ func (c *Client) ScanFile(ctx context.Context, path, content string) (*ScanResul
 // seed (content_type + ":" + content).
 func (c *Client) doSpecializedScan(ctx context.Context, payload map[string]interface{}, cacheSeed string) (*ScanResult, error) {
 	cacheKey := shrike.HashContent(cacheSeed)
-	if cached, ok := c.cache.Get(cacheKey); ok {
-		if result, ok := cached.(*ScanResult); ok {
-			return result, nil
+	if c.cache != nil {
+		if cached, ok := c.cache.Get(cacheKey); ok {
+			if result, ok := cached.(*ScanResult); ok {
+				return result, nil
+			}
 		}
 	}
 
@@ -478,7 +645,7 @@ func (c *Client) doSpecializedScan(ctx context.Context, payload map[string]inter
 		return c.handleScanError(cbErr)
 	}
 
-	if result != nil {
+	if result != nil && c.cache != nil {
 		c.cache.Set(cacheKey, result)
 	}
 
