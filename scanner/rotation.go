@@ -30,27 +30,30 @@ type RotationTriggerInput struct {
 	ModuleSessionID string
 }
 
-// SessionRotation describes what rotation happened (or should happen). It
-// collapses the two TS shapes (ModuleOwnedRotation, CallerOwnedRotation-
-// Recommendation) — discriminate on Rotated: true = module-owned, the caller
-// should adopt NewSessionID for its module session id; false (with
-// RotationRecommended true) = caller-owned, the caller may adopt
-// SuggestedNewSessionID inside its own control flow.
+// SessionRotation describes what rotation happened, or should happen. Three
+// cases; discriminate on Rotated, then on RotationRecommended:
 //
-// EvaluateRotation is pure — it never mutates any module state. Rotating the
-// module session id is the caller's responsibility once they act on a
-// module-owned result.
+//   - Rotated true: module-owned. Adopt NewSessionID.
+//   - Rotated false, RotationRecommended true: caller-owned. The caller may
+//     adopt SuggestedNewSessionID.
+//   - Both false: the session is LOCKED. Neither id is set, and minting one
+//     sidesteps the lock instead of clearing it.
+//
+// EvaluateRotation is pure. Rotating the module session id is the caller's
+// responsibility once they act on a module-owned result.
 type SessionRotation struct {
 	Rotated             bool
 	RotationRecommended bool
 	// Owner is "sdk_client" (module-owned) or "caller" (caller-owned).
 	Owner string
-	// Reason is "session_locked" or "risk_threshold_exceeded".
+	// Reason is "session_locked" (only when both flags are false) or
+	// "risk_threshold_exceeded". Branch on the decision, not on this; see
+	// IsLocked.
 	Reason string
 	// Module-owned fields.
 	PreviousSessionID string
 	NewSessionID      string
-	// Caller-owned fields.
+	// Caller-owned fields, and the locked session's own id.
 	CurrentSessionID      string
 	SuggestedNewSessionID string
 	// TriggeringRiskScore is the score that crossed (nil for a pure lock).
@@ -58,12 +61,35 @@ type SessionRotation struct {
 	ConfiguredThreshold float64
 }
 
+// IsLocked reports whether this record is a locked-session notice rather than
+// a rotation. Check it before reading NewSessionID or SuggestedNewSessionID: on
+// a lock both are empty, so an unguarded read assigns "".
+func (r *SessionRotation) IsLocked() bool {
+	return r != nil && !r.Rotated && !r.RotationRecommended
+}
+
+// SessionID returns the id to adopt after acting on this record, and whether
+// one is on offer. Returns ("", false) on a lock.
+func (r *SessionRotation) SessionID() (string, bool) {
+	switch {
+	case r == nil || r.IsLocked():
+		return "", false
+	case r.Rotated:
+		return r.NewSessionID, r.NewSessionID != ""
+	default:
+		return r.SuggestedNewSessionID, r.SuggestedNewSessionID != ""
+	}
+}
+
 // EvaluateRotation inspects a verdict and returns a SessionRotation record when
 // rotation is warranted, or nil when no trigger fired.
 //
-// Triggers:
-//   - ThreatType == "session_locked" — the backend told the SDK the session is done.
-//   - SessionRiskScore >= RotationThreshold — L9 risk crossed the safe floor.
+// Outcomes:
+//   - ThreatType "session_locked": a notice with both flags false and no new
+//     id. Checked FIRST, since a locked session is already above the score
+//     threshold and would otherwise fall through and rotate. A lock lifts by a
+//     self-release under a live declared scope, or by an operator.
+//   - SessionRiskScore >= RotationThreshold and not locked: rotation warranted.
 //
 // Ownership: when EffectiveSessionID differs from ModuleSessionID the caller
 // supplied their own session id (caller-owned recommendation); otherwise the
@@ -71,16 +97,31 @@ type SessionRotation struct {
 func EvaluateRotation(input RotationTriggerInput) *SessionRotation {
 	locked := input.ThreatType == "session_locked"
 	overThreshold := input.SessionRiskScore != nil && *input.SessionRiskScore >= RotationThreshold
-	if !locked && !overThreshold {
+	callerOwned := input.EffectiveSessionID != input.ModuleSessionID
+
+	if locked {
+		owner := "sdk_client"
+		if callerOwned {
+			owner = "caller"
+		}
+		return &SessionRotation{
+			Rotated:             false,
+			RotationRecommended: false,
+			Owner:               owner,
+			Reason:              "session_locked",
+			CurrentSessionID:    input.EffectiveSessionID,
+			TriggeringRiskScore: input.SessionRiskScore,
+			ConfiguredThreshold: RotationThreshold,
+		}
+	}
+
+	if !overThreshold {
 		return nil
 	}
 
 	reason := "risk_threshold_exceeded"
-	if locked {
-		reason = "session_locked"
-	}
 
-	if input.EffectiveSessionID != input.ModuleSessionID {
+	if callerOwned {
 		return &SessionRotation{
 			Rotated:               false,
 			RotationRecommended:   true,

@@ -2,7 +2,7 @@ package shrike
 
 // PII Pattern Sync — fetches canonical PII patterns from the Shrike backend
 // at startup and updates the client-side redactor so detection coverage
-// matches the backend's Presidio-derived set.
+// matches the backend's canonical set.
 //
 // On any failure (network, timeout, malformed response, unrecognized threat
 // type) sync keeps the hardcoded bootstrap patterns. Pattern sync is a

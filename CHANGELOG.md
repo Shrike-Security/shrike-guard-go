@@ -1,5 +1,21 @@
 # Changelog
 
+## [v1.3.0] - 2026-10-01
+
+### Fixed
+- **A locked session is no longer offered a new session id.** `EvaluateRotation`
+  returned a rotation record carrying a freshly minted id on a `session_locked`
+  verdict. A lock means the session is finished, so it now returns a record with
+  both rotation flags false, `Reason` set to `session_locked`, and no new id to
+  adopt. Recovery from a lock is self-release under a live declared scope, or an
+  operator.
+
+### Added
+- `SessionRotation.IsLocked()` reports a lock without parsing `Reason`, and
+  `SessionRotation.SessionID()` returns the id to use next, with `ok` false
+  under a lock. Go collapses the three wire shapes into one struct, so branch on
+  these rather than on the string.
+
 ## [v1.2.0] - 2026-09-10
 
 ### Added
@@ -151,7 +167,7 @@ pulled in when you import it.
 - **`shrike.SystemPrompt()`** + `shrike.SystemPromptVersion` — the canonical "Working with Shrike" system-prompt block, byte-for-byte identical to the TypeScript and Python SDKs.
 - **`scanner.FormatBlockFeedback(*ScanResult)`** — renders a stable prompt-shape string (block/warn/approval prefix + reason, threat type, session risk, triggered patterns, recovery) to inject as the model's next system message.
 - **`scanner.EvaluateRotation`** + `scanner.RotationThreshold` + `scanner.ModuleSessionID()` — pure session-rotation evaluator.
-- **`pii` package** — client-side PII redaction: `Redact` / `Rehydrate` / `RedactionSummary` / `UpdatePatterns` / `PatternCount`, plus `SyncPatterns` to pull the backend's canonical (Presidio-derived) pattern set. PII never leaves the caller's process; the redactor ships a bootstrap regex set and syncs the canonical set on demand.
+- **`pii` package** — client-side PII redaction: `Redact` / `Rehydrate` / `RedactionSummary` / `UpdatePatterns` / `PatternCount`, plus `SyncPatterns` to pull the backend's canonical pattern set. PII never leaves the caller's process; the redactor ships a bootstrap regex set and syncs the canonical set on demand.
 - **`Client.ScanA2AMessage`** and **`Client.ScanAgentCard`** — specialized scans for agent-to-agent messages and A2A AgentCard JSON.
 - **`api.SandboxClient`** — quota-free sandbox scans (`POST /api/v1/sandbox/scan`), sanitized through the same path as production scans.
 

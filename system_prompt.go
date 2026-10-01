@@ -30,9 +30,11 @@ Patterns triggered, those are correlator signals across your recent
 turns; treat them as evidence your current strategy is being read as
 adversarial.
 
-If Shrike returns a rotation recommendation (rotation_recommended:
-true), adopt the suggested_new_session_id on your very next tool call.
-Do not cache suggested ids across turns; they are minted per event.
+If Shrike recommends rotation (rotation_recommended: true), adopt the
+suggested_new_session_id on your next call; ids are per event, never
+cached. If the session is locked, none is offered and you must not
+mint one: a new id hides history rather than clearing the lock. Ask
+the operator to release it and say so.
 
 Shrike is a collaborator, not an obstacle. When it flags something,
 the fastest recovery is to explain your intent and pick a different
